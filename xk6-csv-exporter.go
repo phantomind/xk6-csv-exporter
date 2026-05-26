@@ -67,11 +67,6 @@ func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter s
 	}
 	defer f.Close()
 
-	// Write UTF-8 BOM for Excel compatibility
-	if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return 0, fmt.Errorf("write BOM: %w", err)
-	}
-
 	w := csv.NewWriter(f)
 	if delimiter != "" && len(delimiter) > 0 {
 		w.Comma = []rune(delimiter)[0]
