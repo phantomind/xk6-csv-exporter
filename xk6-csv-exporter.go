@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -36,6 +37,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 }
 
 type CSVExporter struct{}
+
 
 func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter string) (int, error) {
 	rows, ok := data.([]interface{})
@@ -93,6 +95,7 @@ func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter s
 	return written, w.Error()
 }
 
+
 func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string) (int, error) {
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
@@ -102,6 +105,19 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 
 	if err := db.Ping(); err != nil {
 		return 0, fmt.Errorf("ping failed: %w", err)
+	}
+
+	createSeqSQL := `
+		DECLARE
+			v_count NUMBER;
+		BEGIN
+			SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ';
+			IF v_count = 0 THEN
+				EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1';
+			END IF;
+		END;`
+	if _, err := db.Exec(createSeqSQL); err != nil {
+		return 0, fmt.Errorf("failed to create sequence: %w", err)
 	}
 
 	createTableSQL := `
@@ -116,7 +132,6 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 				) ON COMMIT PRESERVE ROWS';
 			END IF;
 		END;`
-	
 	if _, err := db.Exec(createTableSQL); err != nil {
 		return 0, fmt.Errorf("failed to create temp table: %w", err)
 	}
@@ -125,21 +140,16 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 		return 0, fmt.Errorf("failed to clear temp table: %w", err)
 	}
 
-	modifiedCode := strings.ReplaceAll(
-		plsqlCode, 
-		"DBMS_OUTPUT.PUT_LINE", 
-		"INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES",
-	)
+	modifiedCode := plsqlCode
 
-	modifiedCode = strings.Replace(
-		modifiedCode,
-		"begin",
-		"BEGIN\n  NULL; -- DBMS_OUTPUT перехвачен плагином\n",
-		1,
-	)
+	re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
+	modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
+
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.disable удалено плагином")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.enable удалено плагином")
 
 	if _, err := db.Exec(modifiedCode); err != nil {
-		return 0, fmt.Errorf("PL/SQL execution failed: %w", err)
+		return 0, fmt.Errorf("PL/SQL execution failed: %w\n\nModified code:\n%s", err, modifiedCode)
 	}
 
 	rows, err := db.Query(`
@@ -159,6 +169,9 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 	}
 	defer file.Close()
 
+	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		return 0, fmt.Errorf("failed to write BOM: %w", err)
+	}
 
 	writer := csv.NewWriter(file)
 	if delimiter != "" && len(delimiter) > 0 {
