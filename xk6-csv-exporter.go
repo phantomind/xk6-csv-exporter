@@ -21,9 +21,7 @@ func init() {
 type RootModule struct{}
 
 func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
-	return &ModuleInstance{
-		vu: vu,
-	}
+	return &ModuleInstance{vu: vu}
 }
 
 type ModuleInstance struct {
@@ -38,8 +36,15 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 
 type CSVExporter struct{}
 
-
 func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter string) (int, error) {
+	return c.writeToFileInternal(filename, data, delimiter, false)
+}
+
+func (c *CSVExporter) WriteToFileWithBom(filename string, data interface{}, delimiter string) (int, error) {
+	return c.writeToFileInternal(filename, data, delimiter, true)
+}
+
+func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, delimiter string, withBom bool) (int, error) {
 	rows, ok := data.([]interface{})
 	if !ok || len(rows) == 0 {
 		return 0, fmt.Errorf("data must be a non-empty array of objects")
@@ -61,6 +66,12 @@ func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter s
 		return 0, fmt.Errorf("create file: %w", err)
 	}
 	defer f.Close()
+
+	if withBom {
+		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			return 0, fmt.Errorf("write BOM: %w", err)
+		}
+	}
 
 	w := csv.NewWriter(f)
 	if delimiter != "" && len(delimiter) > 0 {
@@ -95,8 +106,15 @@ func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter s
 	return written, w.Error()
 }
 
-
 func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, false)
+}
+
+func (c *CSVExporter) ExecPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, true)
+}
+
+func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, withBom bool) (int, error) {
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
 		return 0, fmt.Errorf("connection failed: %w", err)
@@ -120,6 +138,7 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 		return 0, fmt.Errorf("failed to create sequence: %w", err)
 	}
 
+	// Создание GTT
 	createTableSQL := `
 		DECLARE
 			v_count NUMBER;
@@ -141,12 +160,10 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 	}
 
 	modifiedCode := plsqlCode
-
 	re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
 	modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
-
-	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.disable удалено плагином")
-	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.enable удалено плагином")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.disable removed by plugin")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.enable removed by plugin")
 
 	if _, err := db.Exec(modifiedCode); err != nil {
 		return 0, fmt.Errorf("PL/SQL execution failed: %w\n\nModified code:\n%s", err, modifiedCode)
@@ -169,8 +186,10 @@ func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFil
 	}
 	defer file.Close()
 
-	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return 0, fmt.Errorf("failed to write BOM: %w", err)
+	if withBom {
+		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			return 0, fmt.Errorf("failed to write BOM: %w", err)
+		}
 	}
 
 	writer := csv.NewWriter(file)
