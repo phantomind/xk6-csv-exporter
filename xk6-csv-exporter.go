@@ -11,7 +11,7 @@ import (
 
 	"go.k6.io/k6/js/modules"
 
-	_ "github.com/sijms/go-ora/v2"
+	_ "github.com/sijms/go-ora/v2" // Oracle driver
 )
 
 func init() {
@@ -36,10 +36,16 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 
 type CSVExporter struct{}
 
+// ============================================================================
+// 🔹 МЕТОДЫ ДЛЯ МАССИВОВ ДАННЫХ (WriteToFile)
+// ============================================================================
+
+// WriteToFile записывает данные в CSV БЕЗ BOM (по умолчанию, для k6)
 func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter string) (int, error) {
 	return c.writeToFileInternal(filename, data, delimiter, false)
 }
 
+// WriteToFileWithBom записывает данные в CSV С BOM (для открытия в Excel)
 func (c *CSVExporter) WriteToFileWithBom(filename string, data interface{}, delimiter string) (int, error) {
 	return c.writeToFileInternal(filename, data, delimiter, true)
 }
@@ -67,6 +73,7 @@ func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, del
 	}
 	defer f.Close()
 
+	// 🔹 BOM записывается ТОЛЬКО если withBom == true
 	if withBom {
 		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 			return 0, fmt.Errorf("write BOM: %w", err)
@@ -106,15 +113,22 @@ func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, del
 	return written, w.Error()
 }
 
-func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string) (int, error) {
-	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, false)
+// ============================================================================
+// 🔹 МЕТОДЫ ДЛЯ PL/SQL (ExecPlSqlToCsv)
+// ============================================================================
+
+// ExecPlSqlToCsv выполняет PL/SQL и экспортирует в CSV БЕЗ BOM (по умолчанию, для k6)
+// JS signature: csv.execPlSqlToCsv(connStr, plsqlCode, outputFile, delimiter, headers)
+func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false)
 }
 
-func (c *CSVExporter) ExecPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string) (int, error) {
-	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, true)
+// ExecPlSqlToCsvWithBom выполняет PL/SQL и экспортирует в CSV С BOM (для Excel)
+func (c *CSVExporter) ExecPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, true)
 }
 
-func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, withBom bool) (int, error) {
+func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}, withBom bool) (int, error) {
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
 		return 0, fmt.Errorf("connection failed: %w", err)
@@ -125,32 +139,14 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		return 0, fmt.Errorf("ping failed: %w", err)
 	}
 
-	createSeqSQL := `
-		DECLARE
-			v_count NUMBER;
-		BEGIN
-			SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ';
-			IF v_count = 0 THEN
-				EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1';
-			END IF;
-		END;`
+	// 1. Создание sequence
+	createSeqSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1'; END IF; END;`
 	if _, err := db.Exec(createSeqSQL); err != nil {
 		return 0, fmt.Errorf("failed to create sequence: %w", err)
 	}
 
-	// Создание GTT
-	createTableSQL := `
-		DECLARE
-			v_count NUMBER;
-		BEGIN
-			SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = 'TMP_K6_DBMS_OUTPUT';
-			IF v_count = 0 THEN
-				EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE TMP_K6_DBMS_OUTPUT (
-					line_data VARCHAR2(4000),
-					line_order NUMBER
-				) ON COMMIT PRESERVE ROWS';
-			END IF;
-		END;`
+	// 2. Создание GTT
+	createTableSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = 'TMP_K6_DBMS_OUTPUT'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE TMP_K6_DBMS_OUTPUT (line_data VARCHAR2(4000), line_order NUMBER) ON COMMIT PRESERVE ROWS'; END IF; END;`
 	if _, err := db.Exec(createTableSQL); err != nil {
 		return 0, fmt.Errorf("failed to create temp table: %w", err)
 	}
@@ -159,33 +155,32 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		return 0, fmt.Errorf("failed to clear temp table: %w", err)
 	}
 
+	// 3. Модификация PL/SQL-кода
 	modifiedCode := plsqlCode
 	re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
 	modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
-	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.disable removed by plugin")
-	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- dbms_output.enable removed by plugin")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
 
 	if _, err := db.Exec(modifiedCode); err != nil {
-		return 0, fmt.Errorf("PL/SQL execution failed: %w\n\nModified code:\n%s", err, modifiedCode)
+		return 0, fmt.Errorf("PL/SQL execution failed: %w", err)
 	}
 
-	rows, err := db.Query(`
-		SELECT line_data 
-		FROM TMP_K6_DBMS_OUTPUT 
-		WHERE line_data LIKE '%;%;%' 
-		ORDER BY line_order
-	`)
+	// 4. Чтение данных (без фильтрации, чтобы ловить любой вывод)
+	rows, err := db.Query(`SELECT line_data FROM TMP_K6_DBMS_OUTPUT ORDER BY line_order`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch output: %w", err)
 	}
 	defer rows.Close()
 
+	// 5. Создание CSV-файла
 	file, err := os.Create(outputFile)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create CSV file: %w", err)
 	}
 	defer file.Close()
 
+	// 🔹 BOM записывается ТОЛЬКО если withBom == true
 	if withBom {
 		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 			return 0, fmt.Errorf("failed to write BOM: %w", err)
@@ -199,10 +194,32 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		writer.Comma = ';'
 	}
 
-	if err := writer.Write([]string{"login", "numberClient", "pass"}); err != nil {
+	// 6. Обработка хедеров
+	var finalHeaders []string
+	var hasCustomHeaders bool
+
+	if headers != nil {
+		if hArray, ok := headers.([]interface{}); ok {
+			for _, h := range hArray {
+				if str, ok := h.(string); ok && str != "" {
+					finalHeaders = append(finalHeaders, str)
+				}
+			}
+			if len(finalHeaders) > 0 {
+				hasCustomHeaders = true
+			}
+		}
+	}
+
+	if !hasCustomHeaders {
+		finalHeaders = []string{"dbms_output_line"}
+	}
+
+	if err := writer.Write(finalHeaders); err != nil {
 		return 0, fmt.Errorf("failed to write headers: %w", err)
 	}
 
+	// 7. Запись строк
 	count := 0
 	for rows.Next() {
 		var lineData string
@@ -210,18 +227,21 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 			continue
 		}
 
-		parts := strings.Split(lineData, ";")
-		if len(parts) >= 3 {
-			login := strings.TrimSpace(parts[0])
-			pass := strings.TrimSpace(parts[1])
-			numberClient := strings.TrimSpace(parts[2])
-
-			record := []string{login, numberClient, pass}
-			if err := writer.Write(record); err != nil {
-				return count, fmt.Errorf("failed to write row: %w", err)
+		var record []string
+		if hasCustomHeaders {
+			parts := strings.Split(lineData, string(writer.Comma))
+			record = make([]string, len(finalHeaders))
+			for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
+				record[i] = strings.TrimSpace(parts[i])
 			}
-			count++
+		} else {
+			record = []string{strings.TrimSpace(lineData)}
 		}
+
+		if err := writer.Write(record); err != nil {
+			return count, fmt.Errorf("failed to write row: %w", err)
+		}
+		count++
 	}
 
 	if err := rows.Err(); err != nil {
