@@ -1,134 +1,28 @@
-package csvexporter
-
-import (
-	"database/sql"
-	"encoding/csv"
-	"fmt"
-	"os"
-	"regexp"
-	"sort"
-	"strings"
-
-	"go.k6.io/k6/js/modules"
-
-	_ "github.com/sijms/go-ora/v2" // Oracle driver
-)
-
-func init() {
-	modules.Register("k6/x/csv-exporter", new(RootModule))
-}
-
-type RootModule struct{}
-
-func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
-	return &ModuleInstance{vu: vu}
-}
-
-type ModuleInstance struct {
-	vu modules.VU
-}
-
-func (mi *ModuleInstance) Exports() modules.Exports {
-	return modules.Exports{
-		Default: &CSVExporter{},
-	}
-}
-
-type CSVExporter struct{}
-
 // ============================================================================
-// 🔹 МЕТОДЫ ДЛЯ МАССИВОВ ДАННЫХ (WriteToFile)
+// 🔹 МЕТОДЫ ДЛЯ PL/SQL (ExecPlSqlToCsv / AppendPlSqlToCsv)
 // ============================================================================
 
-// WriteToFile записывает данные в CSV БЕЗ BOM (по умолчанию, для k6)
-func (c *CSVExporter) WriteToFile(filename string, data interface{}, delimiter string) (int, error) {
-	return c.writeToFileInternal(filename, data, delimiter, false)
-}
-
-// WriteToFileWithBom записывает данные в CSV С BOM (для открытия в Excel)
-func (c *CSVExporter) WriteToFileWithBom(filename string, data interface{}, delimiter string) (int, error) {
-	return c.writeToFileInternal(filename, data, delimiter, true)
-}
-
-func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, delimiter string, withBom bool) (int, error) {
-	rows, ok := data.([]interface{})
-	if !ok || len(rows) == 0 {
-		return 0, fmt.Errorf("data must be a non-empty array of objects")
-	}
-
-	firstRow, ok := rows[0].(map[string]interface{})
-	if !ok {
-		return 0, fmt.Errorf("array elements must be objects")
-	}
-
-	headers := make([]string, 0, len(firstRow))
-	for k := range firstRow {
-		headers = append(headers, k)
-	}
-	sort.Strings(headers)
-
-	f, err := os.Create(filename)
-	if err != nil {
-		return 0, fmt.Errorf("create file: %w", err)
-	}
-	defer f.Close()
-
-	// 🔹 BOM записывается ТОЛЬКО если withBom == true
-	if withBom {
-		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-			return 0, fmt.Errorf("write BOM: %w", err)
-		}
-	}
-
-	w := csv.NewWriter(f)
-	if delimiter != "" && len(delimiter) > 0 {
-		w.Comma = []rune(delimiter)[0]
-	} else {
-		w.Comma = ';'
-	}
-
-	if err := w.Write(headers); err != nil {
-		return 0, fmt.Errorf("write headers: %w", err)
-	}
-
-	written := 0
-	for _, row := range rows {
-		obj, ok := row.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		record := make([]string, len(headers))
-		for i, h := range headers {
-			if val, ok := obj[h]; ok && val != nil {
-				record[i] = fmt.Sprintf("%v", val)
-			}
-		}
-		if err := w.Write(record); err != nil {
-			return written, fmt.Errorf("write row: %w", err)
-		}
-		written++
-	}
-
-	w.Flush()
-	return written, w.Error()
-}
-
-// ============================================================================
-// 🔹 МЕТОДЫ ДЛЯ PL/SQL (ExecPlSqlToCsv)
-// ============================================================================
-
-// ExecPlSqlToCsv выполняет PL/SQL и экспортирует в CSV БЕЗ BOM (по умолчанию, для k6)
-// JS signature: csv.execPlSqlToCsv(connStr, plsqlCode, outputFile, delimiter, headers)
+// ExecPlSqlToCsv: Однопоточная запись (перезапись)
 func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
-	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false)
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false, false)
 }
 
-// ExecPlSqlToCsvWithBom выполняет PL/SQL и экспортирует в CSV С BOM (для Excel)
+// ExecPlSqlToCsvWithBom: Однопоточная запись с BOM
 func (c *CSVExporter) ExecPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
-	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, true)
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, true, false)
 }
 
-func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}, withBom bool) (int, error) {
+// AppendPlSqlToCsv: МНОГОПОТОЧНАЯ запись (добавление)
+func (c *CSVExporter) AppendPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false, true)
+}
+
+// AppendPlSqlToCsvWithBom: Многопоточная запись с BOM
+func (c *CSVExporter) AppendPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
+	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, true, true)
+}
+
+func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}, withBom bool, isAppend bool) (int, error) {
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
 		return 0, fmt.Errorf("connection failed: %w", err)
@@ -139,13 +33,12 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		return 0, fmt.Errorf("ping failed: %w", err)
 	}
 
-	// 1. Создание sequence
+	// 1. Создание sequence и GTT
 	createSeqSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1'; END IF; END;`
 	if _, err := db.Exec(createSeqSQL); err != nil {
 		return 0, fmt.Errorf("failed to create sequence: %w", err)
 	}
 
-	// 2. Создание GTT
 	createTableSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = 'TMP_K6_DBMS_OUTPUT'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE TMP_K6_DBMS_OUTPUT (line_data VARCHAR2(4000), line_order NUMBER) ON COMMIT PRESERVE ROWS'; END IF; END;`
 	if _, err := db.Exec(createTableSQL); err != nil {
 		return 0, fmt.Errorf("failed to create temp table: %w", err)
@@ -155,7 +48,7 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		return 0, fmt.Errorf("failed to clear temp table: %w", err)
 	}
 
-	// 3. Модификация PL/SQL-кода
+	// 2. Модификация PL/SQL-кода
 	modifiedCode := plsqlCode
 	re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
 	modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
@@ -166,22 +59,38 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		return 0, fmt.Errorf("PL/SQL execution failed: %w", err)
 	}
 
-	// 4. Чтение данных (без фильтрации, чтобы ловить любой вывод)
+	// 3. Чтение данных
 	rows, err := db.Query(`SELECT line_data FROM TMP_K6_DBMS_OUTPUT ORDER BY line_order`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch output: %w", err)
 	}
 	defer rows.Close()
 
-	// 5. Создание CSV-файла
-	file, err := os.Create(outputFile)
+	// 4. БЛОКИРОВКА: Гарантируем безопасную многопоточную запись в файл
+	globalFileMutex.Lock()
+	defer globalFileMutex.Unlock()
+
+	var file *os.File
+	if isAppend {
+		// Открываем в режиме добавления (создаем, если не существует)
+		file, err = os.OpenFile(outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	} else {
+		// Режим перезаписи (для setup)
+		file, err = os.Create(outputFile)
+	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to create CSV file: %w", err)
+		return 0, fmt.Errorf("failed to open/create CSV file: %w", err)
 	}
 	defer file.Close()
 
-	// 🔹 BOM записывается ТОЛЬКО если withBom == true
-	if withBom {
+	// Проверяем, пустой ли файл, чтобы решить, писать ли заголовки и BOM
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat file: %w", err)
+	}
+	isNewFile := fileInfo.Size() == 0
+
+	if isNewFile && withBom {
 		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 			return 0, fmt.Errorf("failed to write BOM: %w", err)
 		}
@@ -194,7 +103,7 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		writer.Comma = ';'
 	}
 
-	// 6. Обработка хедеров
+	// 5. Обработка хедеров
 	var finalHeaders []string
 	var hasCustomHeaders bool
 
@@ -215,11 +124,14 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		finalHeaders = []string{"dbms_output_line"}
 	}
 
-	if err := writer.Write(finalHeaders); err != nil {
-		return 0, fmt.Errorf("failed to write headers: %w", err)
+	// Записываем заголовки ТОЛЬКО если файл был пустым
+	if isNewFile {
+		if err := writer.Write(finalHeaders); err != nil {
+			return 0, fmt.Errorf("failed to write headers: %w", err)
+		}
 	}
 
-	// 7. Запись строк
+	// 6. Запись строк
 	count := 0
 	for rows.Next() {
 		var lineData string
