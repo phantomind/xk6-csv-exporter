@@ -1,3 +1,25 @@
+package csvexporter
+
+import (
+	"database/sql"
+	"encoding/csv"
+	"fmt"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+
+	"go.k6.io/k6/js/modules"
+
+	_ "github.com/sijms/go-ora/v2"
+	_ "github.com/sijms/go-ora/v2" // Oracle driver
+)
+
+func init() {
+@@ -36,10 +36,16 @@
+
+type CSVExporter struct{}
+
 // ============================================================================
 // 🔹 МЕТОДЫ ДЛЯ PL/SQL (ExecPlSqlToCsv / AppendPlSqlToCsv)
 // ============================================================================
