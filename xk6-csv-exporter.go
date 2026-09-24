@@ -11,12 +11,28 @@ import (
 
 	"go.k6.io/k6/js/modules"
 
-	_ "github.com/sijms/go-ora/v2"
 	_ "github.com/sijms/go-ora/v2" // Oracle driver
 )
 
 func init() {
-@@ -36,10 +36,16 @@
+	modules.Register("k6/x/csv-exporter", new(RootModule))
+}
+
+type RootModule struct{}
+
+func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
+	return &ModuleInstance{vu: vu}
+}
+
+type ModuleInstance struct {
+	vu modules.VU
+}
+
+func (mi *ModuleInstance) Exports() modules.Exports {
+	return modules.Exports{
+		Default: &CSVExporter{},
+	}
+}
 
 type CSVExporter struct{}
 
