@@ -216,4 +216,87 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 		file, err = os.Create(outputFile)
 	}
 	if err != nil {
-		return 0, fmt.Errorf
+		return 0, fmt.Errorf("failed to open/create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat file: %w", err)
+	}
+	isNewFile := fileInfo.Size() == 0
+
+	if isNewFile && withBom {
+		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			return 0, fmt.Errorf("failed to write BOM: %w", err)
+		}
+	}
+
+	writer := csv.NewWriter(file)
+	if delimiter != "" && len(delimiter) > 0 {
+		writer.Comma = []rune(delimiter)[0]
+	} else {
+		writer.Comma = ';'
+	}
+
+	var finalHeaders []string
+	var hasCustomHeaders bool
+
+	if headers != nil {
+		if hArray, ok := headers.([]interface{}); ok {
+			for _, h := range hArray {
+				if str, ok := h.(string); ok && str != "" {
+					finalHeaders = append(finalHeaders, str)
+				}
+			}
+			if len(finalHeaders) > 0 {
+				hasCustomHeaders = true
+			}
+		}
+	}
+
+	if !hasCustomHeaders {
+		finalHeaders = []string{"dbms_output_line"}
+	}
+
+	if isNewFile {
+		if err := writer.Write(finalHeaders); err != nil {
+			return 0, fmt.Errorf("failed to write headers: %w", err)
+		}
+	}
+
+	count := 0
+	for rows.Next() {
+		var lineData string
+		if err := rows.Scan(&lineData); err != nil {
+			continue
+		}
+
+		var record []string
+		if hasCustomHeaders {
+			parts := strings.Split(lineData, string(writer.Comma))
+			record = make([]string, len(finalHeaders))
+			for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
+				record[i] = strings.TrimSpace(parts[i])
+			}
+		} else {
+			record = []string{strings.TrimSpace(lineData)}
+		}
+
+		if err := writer.Write(record); err != nil {
+			return count, fmt.Errorf("failed to write row: %w", err)
+		}
+		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		return count, fmt.Errorf("error during row iteration: %w", err)
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return count, fmt.Errorf("CSV flush error: %w", err)
+	}
+
+	return count, nil
+}
