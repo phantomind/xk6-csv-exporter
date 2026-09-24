@@ -40,17 +40,17 @@ type CSVExporter struct{}
 // 🔹 МЕТОДЫ ДЛЯ PL/SQL (ExecPlSqlToCsv / AppendPlSqlToCsv)
 // ============================================================================
 
-// ExecPlSqlToCsv: Однопоточная запись (перезапись)
+// ExecPlSqlToCsv: Однопоточная запись (перезапись). Используйте в setup()
 func (c *CSVExporter) ExecPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
 	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false, false)
 }
 
-// ExecPlSqlToCsvWithBom: Однопоточная запись с BOM
+// ExecPlSqlToCsvWithBom: Однопоточная запись с BOM. Используйте в setup() для Excel
 func (c *CSVExporter) ExecPlSqlToCsvWithBom(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
 	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, true, false)
 }
 
-// AppendPlSqlToCsv: МНОГОПОТОЧНАЯ запись (добавление)
+// AppendPlSqlToCsv: МНОГОПОТОЧНАЯ запись (добавление). Используйте в default() при ramping-arrival-rate
 func (c *CSVExporter) AppendPlSqlToCsv(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}) (int, error) {
 	return c.execPlSqlToCsvInternal(connStr, plsqlCode, outputFile, delimiter, headers, false, true)
 }
@@ -104,7 +104,7 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 	}
 	defer rows.Close()
 
-	// 4. БЛОКИРОВКА: Гарантируем безопасную многопоточную запись в файл
+	// 4. 🔹 БЛОКИРОВКА: Гарантируем безопасную многопоточную запись в файл
 	globalFileMutex.Lock()
 	defer globalFileMutex.Unlock()
 
