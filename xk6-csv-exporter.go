@@ -66,19 +66,22 @@ func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, del
 		return 0, fmt.Errorf("data must be a non-empty array of objects")
 	}
 
+	// Если имя файла пустое или "null", просто возвращаем количество строк без записи
+	if filename == "" || filename == "null" {
+		return len(rows), nil
+	}
+
 	firstRow, ok := rows[0].(map[string]interface{})
 	if !ok {
 		return 0, fmt.Errorf("array elements must be objects")
 	}
 
-	// Сортировка заголовков (здесь используется import "sort")
 	headers := make([]string, 0, len(firstRow))
 	for k := range firstRow {
 		headers = append(headers, k)
 	}
 	sort.Strings(headers)
 
-	// Блокировка для безопасной многопоточной записи
 	globalFileMutex.Lock()
 	defer globalFileMutex.Unlock()
 
@@ -205,7 +208,18 @@ func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, o
 	}
 	defer rows.Close()
 
-	// Блокировка для безопасной многопоточной записи
+	// Если файл не нужен, просто считаем строки и выходим, не создавая файл
+	if outputFile == "" || outputFile == "null" {
+		count := 0
+		for rows.Next() {
+			count++ // Продвигаем курсор, чтобы корректно освободить ресурсы БД
+		}
+		if err := rows.Err(); err != nil {
+			return count, fmt.Errorf("error during row iteration: %w", err)
+		}
+		return count, nil
+	}
+
 	globalFileMutex.Lock()
 	defer globalFileMutex.Unlock()
 
