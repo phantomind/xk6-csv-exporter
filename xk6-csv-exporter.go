@@ -119,25 +119,26 @@ func (c *CSVExporter) pushSample(ctx context.Context, metric *metrics.Metric, va
 		return
 	}
 
-	// Получаем текущие теги (scenario, group, vu, iter и т.д.)
-	ctm := state.Tags.GetCurrentValues()
-	tags := ctm.Tags
+	// 🔹 Безопасное получение тегов
+	tags := state.Tags.GetCurrentValues().Tags
 
-	// Добавляем кастомные теги (query_type, file)
+	// 🔹 Добавляем кастомные теги через map
 	if extraTags != nil {
 		for k, v := range extraTags {
 			tags = tags.With(k, v)
 		}
 	}
 
-	metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+	// 🔹 Прямая запись sample
+	sample := metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: metric,
 			Tags:   tags,
 		},
 		Time:  time.Now(),
 		Value: value,
-	})
+	}
+	metrics.PushIfNotDone(ctx, state.Samples, sample)
 }
 
 // ============================================================================
