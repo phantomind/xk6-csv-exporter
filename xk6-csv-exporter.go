@@ -111,10 +111,15 @@ var globalFileMutex sync.Mutex
 
 // pushSample записывает метрику в k6 (аналог встроенного модуля http)
 func (c *CSVExporter) pushSample(ctx context.Context, metric *metrics.Metric, value float64, extraTags map[string]string) {
+	fmt.Fprintf(os.Stderr, "DEBUG pushSample: metric=%v value=%.2f tags=%v\n", 
+    metric.Name, value, extraTags)
+
 	if metric == nil || c.mi == nil {
 		return
 	}
+
 	state := c.mi.vu.State()
+	fmt.Fprintf(os.Stderr, "DEBUG state: %v, samples: %v\n", state != nil, state != nil && state.Samples != nil)
 	if state == nil || state.Samples == nil {
 		return
 	}
