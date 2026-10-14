@@ -161,134 +161,134 @@ func (c *CSVExporter) AppendToFileWithBom(filename string, data interface{}, del
 }
 
 func (c *CSVExporter) writeToFileInternal(filename string, data interface{}, delimiter string, withBom bool, isAppend bool) (int, error) {
-    ctx := c.mi.vu.Context()
-    startTime := time.Now()
-    
-    // 🔹 Теги отражают реальный режим работы
-    isDryRun := filename == "" || filename == "null"
-    
-    opValue := "write"
-    if isAppend {
-        opValue = "append"
-    }
-    
-    fileTag := map[string]string{
-        "file": filename,
-        "op":   opValue,
-    }
-    
-    if withBom {
-        fileTag["bom"] = "true"
-    }
-    if isDryRun {
-        fileTag["dry_run"] = "true"
-    }
+	ctx := c.mi.vu.Context()
+	startTime := time.Now()
 
-    rows, ok := data.([]interface{})
-    if !ok || len(rows) == 0 {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return 0, fmt.Errorf("data must be a non-empty array of objects")
-    }
+	// 🔹 Теги отражают реальный режим работы
+	isDryRun := filename == "" || filename == "null"
 
-    // 🔹 Dry-run mode с полной записью метрик
-    if isDryRun {
-        durationMs := float64(time.Since(startTime).Milliseconds())
-        c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
-        c.pushSample(ctx, c.mi.csvRowsWritten, float64(len(rows)), fileTag)
-        c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
-        return len(rows), nil
-    }
+	opValue := "write"
+	if isAppend {
+		opValue = "append"
+	}
 
-    firstRow, ok := rows[0].(map[string]interface{})
-    if !ok {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return 0, fmt.Errorf("array elements must be objects")
-    }
+	fileTag := map[string]string{
+		"file": filename,
+		"op":   opValue,
+	}
 
-    headers := make([]string, 0, len(firstRow))
-    for k := range firstRow {
-        headers = append(headers, k)
-    }
-    sort.Strings(headers)
+	if withBom {
+		fileTag["bom"] = "true"
+	}
+	if isDryRun {
+		fileTag["dry_run"] = "true"
+	}
 
-    globalFileMutex.Lock()
-    defer globalFileMutex.Unlock()
+	rows, ok := data.([]interface{})
+	if !ok || len(rows) == 0 {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return 0, fmt.Errorf("data must be a non-empty array of objects")
+	}
 
-    var f *os.File
-    var err error
+	// 🔹 Dry-run mode с полной записью метрик
+	if isDryRun {
+		durationMs := float64(time.Since(startTime).Milliseconds())
+		c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
+		c.pushSample(ctx, c.mi.csvRowsWritten, float64(len(rows)), fileTag)
+		c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+		return len(rows), nil
+	}
 
-    if isAppend {
-        f, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    } else {
-        f, err = os.Create(filename)
-    }
-    if err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return 0, fmt.Errorf("open/create file: %w", err)
-    }
-    defer f.Close()
+	firstRow, ok := rows[0].(map[string]interface{})
+	if !ok {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return 0, fmt.Errorf("array elements must be objects")
+	}
 
-    fileInfo, err := f.Stat()
-    if err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return 0, fmt.Errorf("stat file: %w", err)
-    }
+	headers := make([]string, 0, len(firstRow))
+	for k := range firstRow {
+		headers = append(headers, k)
+	}
+	sort.Strings(headers)
 
-    isNewFile := fileInfo.Size() == 0
+	globalFileMutex.Lock()
+	defer globalFileMutex.Unlock()
 
-    if isNewFile && withBom {
-        if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return 0, fmt.Errorf("write BOM: %w", err)
-        }
-    }
+	var f *os.File
+	var err error
 
-    w := csv.NewWriter(f)
-    if delimiter != "" && len(delimiter) > 0 {
-        w.Comma = []rune(delimiter)[0]
-    } else {
-        w.Comma = ';'
-    }
+	if isAppend {
+		f, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	} else {
+		f, err = os.Create(filename)
+	}
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return 0, fmt.Errorf("open/create file: %w", err)
+	}
+	defer f.Close()
 
-    if isNewFile {
-        if err := w.Write(headers); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return 0, fmt.Errorf("write headers: %w", err)
-        }
-    }
+	fileInfo, err := f.Stat()
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return 0, fmt.Errorf("stat file: %w", err)
+	}
 
-    written := 0
-    for _, row := range rows {
-        obj, ok := row.(map[string]interface{})
-        if !ok {
-            continue
-        }
-        record := make([]string, len(headers))
-        for i, h := range headers {
-            if val, ok := obj[h]; ok && val != nil {
-                record[i] = fmt.Sprintf("%v", val)
-            }
-        }
-        if err := w.Write(record); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return written, fmt.Errorf("write row: %w", err)
-        }
-        written++
-    }
+	isNewFile := fileInfo.Size() == 0
 
-    w.Flush()
-    if err := w.Error(); err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return written, err
-    }
+	if isNewFile && withBom {
+		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return 0, fmt.Errorf("write BOM: %w", err)
+		}
+	}
 
-    // 🔹 Успешные метрики
-    durationMs := float64(time.Since(startTime).Milliseconds())
-    c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
-    c.pushSample(ctx, c.mi.csvRowsWritten, float64(written), fileTag)
-    c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+	w := csv.NewWriter(f)
+	if delimiter != "" && len(delimiter) > 0 {
+		w.Comma = []rune(delimiter)[0]
+	} else {
+		w.Comma = ';'
+	}
 
-    return written, nil
+	if isNewFile {
+		if err := w.Write(headers); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return 0, fmt.Errorf("write headers: %w", err)
+		}
+	}
+
+	written := 0
+	for _, row := range rows {
+		obj, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		record := make([]string, len(headers))
+		for i, h := range headers {
+			if val, ok := obj[h]; ok && val != nil {
+				record[i] = fmt.Sprintf("%v", val)
+			}
+		}
+		if err := w.Write(record); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return written, fmt.Errorf("write row: %w", err)
+		}
+		written++
+	}
+
+	w.Flush()
+	if err := w.Error(); err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return written, err
+	}
+
+	// 🔹 Успешные метрики
+	durationMs := float64(time.Since(startTime).Milliseconds())
+	c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
+	c.pushSample(ctx, c.mi.csvRowsWritten, float64(written), fileTag)
+	c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+
+	return written, nil
 }
 
 // ============================================================================
@@ -312,234 +312,434 @@ func (c *CSVExporter) AppendPlSqlToCsvWithBom(connStr string, plsqlCode string, 
 }
 
 func (c *CSVExporter) execPlSqlToCsvInternal(connStr string, plsqlCode string, outputFile string, delimiter string, headers interface{}, withBom bool, isAppend bool) (int, error) {
-    ctx := c.mi.vu.Context()
-    startTime := time.Now()
-    
-    // 🔹 Теги для всех режимов
-    isDryRun := outputFile == "" || outputFile == "null"
-    
-    sqlTag := map[string]string{
-        "query_type": "plsql",
-    }
-    
-    opValue := "plsql"
-    if isAppend {
-        opValue = "plsql_append"
-    }
-    
-    fileTag := map[string]string{
-        "file": outputFile,
-        "op":   opValue,
-    }
-    
-    if withBom {
-        fileTag["bom"] = "true"
-    }
-    if isDryRun {
-        fileTag["dry_run"] = "true"
-    }
+	ctx := c.mi.vu.Context()
+	startTime := time.Now()
 
-    // Вспомогательная функция для фиксации ошибки SQL
-    failSQL := func(err error) (int, error) {
-        durationMs := float64(time.Since(startTime).Milliseconds())
-        c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
-        c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
-        c.pushSample(ctx, c.mi.sqlQueryFailed, 1, sqlTag)
-        return 0, err
-    }
+	// 🔹 Теги для всех режимов
+	isDryRun := outputFile == "" || outputFile == "null"
 
-    db, err := sql.Open("oracle", connStr)
-    if err != nil {
-        return failSQL(fmt.Errorf("connection failed: %w", err))
-    }
-    defer db.Close()
+	sqlTag := map[string]string{
+		"query_type": "plsql",
+	}
 
-    if err := db.Ping(); err != nil {
-        return failSQL(fmt.Errorf("ping failed: %w", err))
-    }
+	opValue := "plsql"
+	if isAppend {
+		opValue = "plsql_append"
+	}
 
-    createSeqSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1'; END IF; END;`
-    if _, err := db.Exec(createSeqSQL); err != nil {
-        return failSQL(fmt.Errorf("failed to create sequence: %w", err))
-    }
+	fileTag := map[string]string{
+		"file": outputFile,
+		"op":   opValue,
+	}
 
-    createTableSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = 'TMP_K6_DBMS_OUTPUT'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE TMP_K6_DBMS_OUTPUT (line_data VARCHAR2(4000), line_order NUMBER) ON COMMIT PRESERVE ROWS'; END IF; END;`
-    if _, err := db.Exec(createTableSQL); err != nil {
-        return failSQL(fmt.Errorf("failed to create temp table: %w", err))
-    }
+	if withBom {
+		fileTag["bom"] = "true"
+	}
+	if isDryRun {
+		fileTag["dry_run"] = "true"
+	}
 
-    if _, err := db.Exec("DELETE FROM TMP_K6_DBMS_OUTPUT"); err != nil {
-        return failSQL(fmt.Errorf("failed to clear temp table: %w", err))
-    }
+	// Вспомогательная функция для фиксации ошибки SQL
+	failSQL := func(err error) (int, error) {
+		durationMs := float64(time.Since(startTime).Milliseconds())
+		c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryFailed, 1, sqlTag)
+		return 0, err
+	}
 
-    modifiedCode := plsqlCode
-    re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
-    modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
-    modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
-    modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
+	db, err := sql.Open("oracle", connStr)
+	if err != nil {
+		return failSQL(fmt.Errorf("connection failed: %w", err))
+	}
+	defer db.Close()
 
-    if _, err := db.Exec(modifiedCode); err != nil {
-        return failSQL(fmt.Errorf("PL/SQL execution failed: %w", err))
-    }
+	if err := db.Ping(); err != nil {
+		return failSQL(fmt.Errorf("ping failed: %w", err))
+	}
 
-    rows, err := db.Query(`SELECT line_data FROM TMP_K6_DBMS_OUTPUT ORDER BY line_order`)
-    if err != nil {
-        return failSQL(fmt.Errorf("failed to fetch output: %w", err))
-    }
-    defer rows.Close()
+	createSeqSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_sequences WHERE sequence_name = 'TMP_K6_DBMS_OUTPUT_SEQ'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE SEQUENCE TMP_K6_DBMS_OUTPUT_SEQ START WITH 1 INCREMENT BY 1'; END IF; END;`
+	if _, err := db.Exec(createSeqSQL); err != nil {
+		return failSQL(fmt.Errorf("failed to create sequence: %w", err))
+	}
 
-    // Обработка заголовков (одинаково для обоих режимов)
-    var finalHeaders []string
-    var hasCustomHeaders bool
+	createTableSQL := `DECLARE v_count NUMBER; BEGIN SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = 'TMP_K6_DBMS_OUTPUT'; IF v_count = 0 THEN EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE TMP_K6_DBMS_OUTPUT (line_data VARCHAR2(4000), line_order NUMBER) ON COMMIT PRESERVE ROWS'; END IF; END;`
+	if _, err := db.Exec(createTableSQL); err != nil {
+		return failSQL(fmt.Errorf("failed to create temp table: %w", err))
+	}
 
-    if headers != nil {
-        if hArray, ok := headers.([]interface{}); ok {
-            for _, h := range hArray {
-                if str, ok := h.(string); ok && str != "" {
-                    finalHeaders = append(finalHeaders, str)
-                }
-            }
-            if len(finalHeaders) > 0 {
-                hasCustomHeaders = true
-            }
-        }
-    }
+	if _, err := db.Exec("DELETE FROM TMP_K6_DBMS_OUTPUT"); err != nil {
+		return failSQL(fmt.Errorf("failed to clear temp table: %w", err))
+	}
 
-    if !hasCustomHeaders {
-        finalHeaders = []string{"dbms_output_line"}
-    }
+	modifiedCode := plsqlCode
+	re := regexp.MustCompile(`(?i)DBMS_OUTPUT\.PUT_LINE\s*\((.*?)\)\s*;`)
+	modifiedCode = re.ReplaceAllString(modifiedCode, `INSERT INTO TMP_K6_DBMS_OUTPUT(line_data, line_order) VALUES ($1, TMP_K6_DBMS_OUTPUT_SEQ.NEXTVAL);`)
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.disable\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
+	modifiedCode = regexp.MustCompile(`(?i)dbms_output\.enable\s*\([^)]*\)\s*;`).ReplaceAllString(modifiedCode, "-- removed by plugin")
 
-    delimiterRune := ';'
-    if delimiter != "" && len(delimiter) > 0 {
-        delimiterRune = []rune(delimiter)[0]
-    }
+	if _, err := db.Exec(modifiedCode); err != nil {
+		return failSQL(fmt.Errorf("PL/SQL execution failed: %w", err))
+	}
 
-    // 🔹 Dry-run mode
-    if isDryRun {
-        count := 0
-        for rows.Next() {
-            var lineData string
-            if err := rows.Scan(&lineData); err != nil {
-                continue
-            }
-            
-            if hasCustomHeaders {
-                parts := strings.Split(lineData, string(delimiterRune))
-                _ = make([]string, len(finalHeaders))
-                for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
-                    _ = strings.TrimSpace(parts[i])
-                }
-            } else {
-                _ = strings.TrimSpace(lineData)
-            }
-            count++
-        }
-        
-        if err := rows.Err(); err != nil {
-            return failSQL(fmt.Errorf("error during row iteration: %w", err))
-        }
-        
-        durationMs := float64(time.Since(startTime).Milliseconds())
-        
-        // SQL-метрики
-        c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
-        c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
-        c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
-        c.pushSample(ctx, c.mi.sqlRowsReturned, float64(count), sqlTag)
-        
-        // CSV-метрики (dry-run)
-        c.pushSample(ctx, c.mi.csvWriteDuration, 0, fileTag)
-        c.pushSample(ctx, c.mi.csvRowsWritten, float64(count), fileTag)
-        c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
-        
-        return count, nil
-    }
+	rows, err := db.Query(`SELECT line_data FROM TMP_K6_DBMS_OUTPUT ORDER BY line_order`)
+	if err != nil {
+		return failSQL(fmt.Errorf("failed to fetch output: %w", err))
+	}
+	defer rows.Close()
 
-    // 🔹 Стандартный режим с записью в файл
-    globalFileMutex.Lock()
-    defer globalFileMutex.Unlock()
+	// Обработка заголовков (одинаково для обоих режимов)
+	var finalHeaders []string
+	var hasCustomHeaders bool
 
-    var file *os.File
-    if isAppend {
-        file, err = os.OpenFile(outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    } else {
-        file, err = os.Create(outputFile)
-    }
-    if err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return failSQL(fmt.Errorf("failed to open/create CSV file: %w", err))
-    }
-    defer file.Close()
+	if headers != nil {
+		if hArray, ok := headers.([]interface{}); ok {
+			for _, h := range hArray {
+				if str, ok := h.(string); ok && str != "" {
+					finalHeaders = append(finalHeaders, str)
+				}
+			}
+			if len(finalHeaders) > 0 {
+				hasCustomHeaders = true
+			}
+		}
+	}
 
-    fileInfo, err := file.Stat()
-    if err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return failSQL(fmt.Errorf("stat file: %w", err))
-    }
-    isNewFile := fileInfo.Size() == 0
+	if !hasCustomHeaders {
+		finalHeaders = []string{"dbms_output_line"}
+	}
 
-    if isNewFile && withBom {
-        if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return failSQL(fmt.Errorf("failed to write BOM: %w", err))
-        }
-    }
+	delimiterRune := ';'
+	if delimiter != "" && len(delimiter) > 0 {
+		delimiterRune = []rune(delimiter)[0]
+	}
 
-    writer := csv.NewWriter(file)
-    writer.Comma = delimiterRune
+	// 🔹 Dry-run mode
+	if isDryRun {
+		count := 0
+		for rows.Next() {
+			var lineData string
+			if err := rows.Scan(&lineData); err != nil {
+				continue
+			}
 
-    if isNewFile {
-        if err := writer.Write(finalHeaders); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return failSQL(fmt.Errorf("failed to write headers: %w", err))
-        }
-    }
+			if hasCustomHeaders {
+				parts := strings.Split(lineData, string(delimiterRune))
+				_ = make([]string, len(finalHeaders))
+				for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
+					_ = strings.TrimSpace(parts[i])
+				}
+			} else {
+				_ = strings.TrimSpace(lineData)
+			}
+			count++
+		}
 
-    count := 0
-    for rows.Next() {
-        var lineData string
-        if err := rows.Scan(&lineData); err != nil {
-            continue
-        }
+		if err := rows.Err(); err != nil {
+			return failSQL(fmt.Errorf("error during row iteration: %w", err))
+		}
 
-        var record []string
-        if hasCustomHeaders {
-            parts := strings.Split(lineData, string(writer.Comma))
-            record = make([]string, len(finalHeaders))
-            for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
-                record[i] = strings.TrimSpace(parts[i])
-            }
-        } else {
-            record = []string{strings.TrimSpace(lineData)}
-        }
+		durationMs := float64(time.Since(startTime).Milliseconds())
 
-        if err := writer.Write(record); err != nil {
-            c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-            return count, fmt.Errorf("failed to write row: %w", err)
-        }
-        count++
-    }
+		// SQL-метрики
+		c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
+		c.pushSample(ctx, c.mi.sqlRowsReturned, float64(count), sqlTag)
 
-    if err := rows.Err(); err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return count, fmt.Errorf("error during row iteration: %w", err)
-    }
+		// CSV-метрики (dry-run)
+		c.pushSample(ctx, c.mi.csvWriteDuration, 0, fileTag)
+		c.pushSample(ctx, c.mi.csvRowsWritten, float64(count), fileTag)
+		c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
 
-    writer.Flush()
-    if err := writer.Error(); err != nil {
-        c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
-        return count, fmt.Errorf("CSV flush error: %w", err)
-    }
+		return count, nil
+	}
 
-    // 🔹 Успешные метрики SQL + CSV
-    durationMs := float64(time.Since(startTime).Milliseconds())
-    c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
-    c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
-    c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
-    c.pushSample(ctx, c.mi.sqlRowsReturned, float64(count), sqlTag)
-    c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
-    c.pushSample(ctx, c.mi.csvRowsWritten, float64(count), fileTag)
-    c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+	// 🔹 Стандартный режим с записью в файл
+	globalFileMutex.Lock()
+	defer globalFileMutex.Unlock()
 
-    return count, nil
+	var file *os.File
+	if isAppend {
+		file, err = os.OpenFile(outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	} else {
+		file, err = os.Create(outputFile)
+	}
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return failSQL(fmt.Errorf("failed to open/create CSV file: %w", err))
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return failSQL(fmt.Errorf("stat file: %w", err))
+	}
+	isNewFile := fileInfo.Size() == 0
+
+	if isNewFile && withBom {
+		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return failSQL(fmt.Errorf("failed to write BOM: %w", err))
+		}
+	}
+
+	writer := csv.NewWriter(file)
+	writer.Comma = delimiterRune
+
+	if isNewFile {
+		if err := writer.Write(finalHeaders); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return failSQL(fmt.Errorf("failed to write headers: %w", err))
+		}
+	}
+
+	count := 0
+	for rows.Next() {
+		var lineData string
+		if err := rows.Scan(&lineData); err != nil {
+			continue
+		}
+
+		var record []string
+		if hasCustomHeaders {
+			parts := strings.Split(lineData, string(writer.Comma))
+			record = make([]string, len(finalHeaders))
+			for i := 0; i < len(finalHeaders) && i < len(parts); i++ {
+				record[i] = strings.TrimSpace(parts[i])
+			}
+		} else {
+			record = []string{strings.TrimSpace(lineData)}
+		}
+
+		if err := writer.Write(record); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return count, fmt.Errorf("failed to write row: %w", err)
+		}
+		count++
+	}
+
+	if err := rows.Err(); err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return count, fmt.Errorf("error during row iteration: %w", err)
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return count, fmt.Errorf("CSV flush error: %w", err)
+	}
+
+	// 🔹 Успешные метрики SQL + CSV
+	durationMs := float64(time.Since(startTime).Milliseconds())
+	c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
+	c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
+	c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
+	c.pushSample(ctx, c.mi.sqlRowsReturned, float64(count), sqlTag)
+	c.pushSample(ctx, c.mi.csvWriteDuration, durationMs, fileTag)
+	c.pushSample(ctx, c.mi.csvRowsWritten, float64(count), fileTag)
+	c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+
+	return count, nil
+}
+
+// ============================================================================
+// 🔹 МЕТОДЫ ДЛЯ SQL-ЗАПРОСОВ (единая картина мониторинга)
+// ============================================================================
+
+// WriteSqlToCsv выполняет SQL-запрос и записывает результат в CSV (перезапись)
+func (c *CSVExporter) WriteSqlToCsv(connStr string, sqlQuery string, outputFile string, delimiter string) (int, error) {
+	return c.writeSqlToCsvInternal(connStr, sqlQuery, outputFile, delimiter, false, false)
+}
+
+// WriteSqlToCsvWithBom выполняет SQL-запрос и записывает результат в CSV с BOM (перезапись)
+func (c *CSVExporter) WriteSqlToCsvWithBom(connStr string, sqlQuery string, outputFile string, delimiter string) (int, error) {
+	return c.writeSqlToCsvInternal(connStr, sqlQuery, outputFile, delimiter, true, false)
+}
+
+// AppendSqlToCsv выполняет SQL-запрос и добавляет результат в CSV
+func (c *CSVExporter) AppendSqlToCsv(connStr string, sqlQuery string, outputFile string, delimiter string) (int, error) {
+	return c.writeSqlToCsvInternal(connStr, sqlQuery, outputFile, delimiter, false, true)
+}
+
+// AppendSqlToCsvWithBom выполняет SQL-запрос и добавляет результат в CSV с BOM
+func (c *CSVExporter) AppendSqlToCsvWithBom(connStr string, sqlQuery string, outputFile string, delimiter string) (int, error) {
+	return c.writeSqlToCsvInternal(connStr, sqlQuery, outputFile, delimiter, true, true)
+}
+
+func (c *CSVExporter) writeSqlToCsvInternal(connStr string, sqlQuery string, outputFile string, delimiter string, withBom bool, isAppend bool) (int, error) {
+	ctx := c.mi.vu.Context()
+	startTime := time.Now()
+
+	// 🔹 Определяем режим работы
+	isDryRun := outputFile == "" || outputFile == "null"
+
+	// 🔹 Теги для SQL-метрик (единый формат с PL/SQL)
+	sqlTag := map[string]string{"query_type": "sql"}
+
+	// 🔹 Теги для CSV-метрик
+	opValue := "sql"
+	if isAppend {
+		opValue = "sql_append"
+	}
+	fileTag := map[string]string{
+		"file": outputFile,
+		"op":   opValue,
+	}
+	if withBom {
+		fileTag["bom"] = "true"
+	}
+	if isDryRun {
+		fileTag["dry_run"] = "true"
+	}
+
+	// Вспомогательная функция для фиксации ошибки SQL
+	failSQL := func(err error) (int, error) {
+		durationMs := float64(time.Since(startTime).Milliseconds())
+		c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
+		c.pushSample(ctx, c.mi.sqlQueryFailed, 1, sqlTag)
+		return 0, err
+	}
+
+	// 1. Подключение к БД
+	db, err := sql.Open("oracle", connStr)
+	if err != nil {
+		return failSQL(fmt.Errorf("connection failed: %w", err))
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		return failSQL(fmt.Errorf("ping failed: %w", err))
+	}
+
+	// 2. Выполнение SQL-запроса
+	rows, err := db.Query(sqlQuery)
+	if err != nil {
+		return failSQL(fmt.Errorf("SQL execution failed: %w", err))
+	}
+	defer rows.Close()
+
+	// 3. Получение структуры результата (имена колонок)
+	columns, err := rows.Columns()
+	if err != nil {
+		return failSQL(fmt.Errorf("failed to get columns: %w", err))
+	}
+
+	// 4. Чтение всех строк с правильной обработкой типов Oracle
+	var dataRows [][]interface{}
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		pointers := make([]interface{}, len(columns))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err := rows.Scan(pointers...); err != nil {
+			continue
+		}
+		dataRows = append(dataRows, values)
+	}
+
+	if err := rows.Err(); err != nil {
+		return failSQL(fmt.Errorf("error during row iteration: %w", err))
+	}
+
+	// 5. 🔹 SQL-метрики (записываются ВСЕГДА, даже в dry-run)
+	sqlDurationMs := float64(time.Since(startTime).Milliseconds())
+	c.pushSample(ctx, c.mi.sqlQueryDuration, sqlDurationMs, sqlTag)
+	c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
+	c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
+	c.pushSample(ctx, c.mi.sqlRowsReturned, float64(len(dataRows)), sqlTag)
+
+	// 6. Dry-run mode: метрики записаны, файл не создаём
+	if isDryRun {
+		c.pushSample(ctx, c.mi.csvWriteDuration, 0, fileTag)
+		c.pushSample(ctx, c.mi.csvRowsWritten, float64(len(dataRows)), fileTag)
+		c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+		return len(dataRows), nil
+	}
+
+	// 7. Запись в CSV с отдельным замером времени
+	csvStartTime := time.Now()
+
+	globalFileMutex.Lock()
+	defer globalFileMutex.Unlock()
+
+	var file *os.File
+	if isAppend {
+		file, err = os.OpenFile(outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	} else {
+		file, err = os.Create(outputFile)
+	}
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return len(dataRows), fmt.Errorf("failed to open/create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return len(dataRows), fmt.Errorf("stat file: %w", err)
+	}
+	isNewFile := fileInfo.Size() == 0
+
+	// BOM только для новых файлов
+	if isNewFile && withBom {
+		if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return len(dataRows), fmt.Errorf("failed to write BOM: %w", err)
+		}
+	}
+
+	writer := csv.NewWriter(file)
+	delimiterRune := ';'
+	if delimiter != "" && len(delimiter) > 0 {
+		delimiterRune = []rune(delimiter)[0]
+	}
+	writer.Comma = delimiterRune
+
+	// Заголовки только для нового файла (при append не дублируем)
+	if isNewFile {
+		if err := writer.Write(columns); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return len(dataRows), fmt.Errorf("failed to write headers: %w", err)
+		}
+	}
+
+	// Запись строк с корректной конверсацией типов
+	written := 0
+	for _, row := range dataRows {
+		record := make([]string, len(columns))
+		for i, val := range row {
+			if val == nil {
+				record[i] = ""
+			} else if b, ok := val.([]byte); ok {
+				// Oracle часто возвращает []byte — конвертируем в string
+				record[i] = string(b)
+			} else {
+				record[i] = fmt.Sprintf("%v", val)
+			}
+		}
+		if err := writer.Write(record); err != nil {
+			c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+			return written, fmt.Errorf("failed to write row: %w", err)
+		}
+		written++
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		c.pushSample(ctx, c.mi.csvWriteFailed, 1, fileTag)
+		return written, fmt.Errorf("CSV flush error: %w", err)
+	}
+
+	// 8. 🔹 CSV-метрики
+	csvDurationMs := float64(time.Since(csvStartTime).Milliseconds())
+	c.pushSample(ctx, c.mi.csvWriteDuration, csvDurationMs, fileTag)
+	c.pushSample(ctx, c.mi.csvRowsWritten, float64(written), fileTag)
+	c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
+
+	return written, nil
 }
