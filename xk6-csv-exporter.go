@@ -594,41 +594,59 @@ func (c *CSVExporter) writeSqlToCsvInternal(connStr string, sqlQuery string, out
 		fileTag["dry_run"] = "true"
 	}
 
-	// Вспомогательная функция для фиксации ошибки SQL
-	failSQL := func(err error) (int, error) {
+	// 🔹 Переменные для финальной записи метрик (один раз в конце)
+	var sqlFailed float64 = 0
+	var sqlRowsCount float64 = 0
+	var sqlErr error
+	var dataRows [][]interface{}
+	var columns []string
+
+	// Функция для финальной записи SQL-метрик
+	recordSQLMetrics := func() {
 		durationMs := float64(time.Since(startTime).Milliseconds())
 		c.pushSample(ctx, c.mi.sqlQueryDuration, durationMs, sqlTag)
 		c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
-		c.pushSample(ctx, c.mi.sqlQueryFailed, 1, sqlTag)
-		return 0, err
+		c.pushSample(ctx, c.mi.sqlQueryFailed, sqlFailed, sqlTag)
+		c.pushSample(ctx, c.mi.sqlRowsReturned, sqlRowsCount, sqlTag)
 	}
 
 	// 1. Подключение к БД
 	db, err := sql.Open("oracle", connStr)
 	if err != nil {
-		return failSQL(fmt.Errorf("connection failed: %w", err))
+		sqlFailed = 1
+		sqlErr = fmt.Errorf("connection failed: %w", err)
+		recordSQLMetrics()
+		return 0, sqlErr
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		return failSQL(fmt.Errorf("ping failed: %w", err))
+		sqlFailed = 1
+		sqlErr = fmt.Errorf("ping failed: %w", err)
+		recordSQLMetrics()
+		return 0, sqlErr
 	}
 
 	// 2. Выполнение SQL-запроса
 	rows, err := db.Query(sqlQuery)
 	if err != nil {
-		return failSQL(fmt.Errorf("SQL execution failed: %w", err))
+		sqlFailed = 1
+		sqlErr = fmt.Errorf("SQL execution failed: %w", err)
+		recordSQLMetrics()
+		return 0, sqlErr
 	}
 	defer rows.Close()
 
 	// 3. Получение структуры результата (имена колонок)
-	columns, err := rows.Columns()
+	columns, err = rows.Columns()
 	if err != nil {
-		return failSQL(fmt.Errorf("failed to get columns: %w", err))
+		sqlFailed = 1
+		sqlErr = fmt.Errorf("failed to get columns: %w", err)
+		recordSQLMetrics()
+		return 0, sqlErr
 	}
 
 	// 4. Чтение всех строк с правильной обработкой типов Oracle
-	var dataRows [][]interface{}
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
 		pointers := make([]interface{}, len(columns))
@@ -642,20 +660,20 @@ func (c *CSVExporter) writeSqlToCsvInternal(connStr string, sqlQuery string, out
 	}
 
 	if err := rows.Err(); err != nil {
-		return failSQL(fmt.Errorf("error during row iteration: %w", err))
+		sqlFailed = 1
+		sqlErr = fmt.Errorf("error during row iteration: %w", err)
+		recordSQLMetrics()
+		return 0, sqlErr
 	}
 
-	// 5. 🔹 SQL-метрики (записываются ВСЕГДА, даже в dry-run)
-	sqlDurationMs := float64(time.Since(startTime).Milliseconds())
-	c.pushSample(ctx, c.mi.sqlQueryDuration, sqlDurationMs, sqlTag)
-	c.pushSample(ctx, c.mi.sqlQueryCount, 1, sqlTag)
-	c.pushSample(ctx, c.mi.sqlQueryFailed, 0, sqlTag)
-	c.pushSample(ctx, c.mi.sqlRowsReturned, float64(len(dataRows)), sqlTag)
+	// 🔹 Успешное выполнение SQL - записываем метрики ОДИН РАЗ
+	sqlRowsCount = float64(len(dataRows))
+	recordSQLMetrics()
 
 	// 6. Dry-run mode: метрики записаны, файл не создаём
 	if isDryRun {
 		c.pushSample(ctx, c.mi.csvWriteDuration, 0, fileTag)
-		c.pushSample(ctx, c.mi.csvRowsWritten, float64(len(dataRows)), fileTag)
+		c.pushSample(ctx, c.mi.csvRowsWritten, sqlRowsCount, fileTag)
 		c.pushSample(ctx, c.mi.csvWriteFailed, 0, fileTag)
 		return len(dataRows), nil
 	}
@@ -735,7 +753,7 @@ func (c *CSVExporter) writeSqlToCsvInternal(connStr string, sqlQuery string, out
 		return written, fmt.Errorf("CSV flush error: %w", err)
 	}
 
-	// 8. 🔹 CSV-метрики
+	// 8. 🔹 CSV-метрики (успех)
 	csvDurationMs := float64(time.Since(csvStartTime).Milliseconds())
 	c.pushSample(ctx, c.mi.csvWriteDuration, csvDurationMs, fileTag)
 	c.pushSample(ctx, c.mi.csvRowsWritten, float64(written), fileTag)
